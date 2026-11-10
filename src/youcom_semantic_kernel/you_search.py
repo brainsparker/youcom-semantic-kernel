@@ -8,7 +8,7 @@ import sys
 from collections.abc import AsyncIterable, Callable
 from importlib.metadata import PackageNotFoundError, version
 from inspect import getsource
-from typing import Any, ClassVar, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal
 
 from httpx import AsyncClient, HTTPStatusError, RequestError
 from pydantic import Field, SecretStr, ValidationError
@@ -27,6 +27,9 @@ if sys.version_info >= (3, 12):
     from typing import override
 else:
     from typing_extensions import override
+
+if TYPE_CHECKING:
+    from agent_framework import FunctionTool
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -55,6 +58,16 @@ _RATE_LIMIT_STATUSES: Final[tuple[int, ...]] = (402, 429)
 _UPGRADE_HINT: Final[str] = (
     "You.com keyless free-tier limit reached. Set the YDC_API_KEY environment variable "
     "(or pass api_key) for higher limits - get a free API key at https://you.com/platform."
+)
+
+DEFAULT_TOOL_NAME: Final[str] = "you_search"
+DEFAULT_TOOL_DESCRIPTION: Final[str] = (
+    "Search the web with You.com for current information. Returns a numbered list of results, "
+    "each with a title, a URL to cite, and text snippets from the page."
+)
+_AGENT_FRAMEWORK_HINT: Final[str] = (
+    "Microsoft Agent Framework is not installed. Install it with "
+    "`pip install 'youcom-semantic-kernel[agent-framework]'` (requires Python 3.11 or newer)."
 )
 # endregion Constants
 
@@ -191,6 +204,115 @@ class YouSearch(KernelBaseModel, TextSearch):
             metadata=self._get_metadata(results),
         )
 
+    def as_agent_framework_tool(
+        self,
+        name: str = DEFAULT_TOOL_NAME,
+        description: str = DEFAULT_TOOL_DESCRIPTION,
+        *,
+        top: int = 5,
+        freshness: str | None = None,
+        country: str | None = None,
+        language: str | None = None,
+        safesearch: str | None = None,
+        approval_mode: Literal["always_require", "never_require"] = "never_require",
+        max_invocations: int | None = None,
+    ) -> "FunctionTool":
+        """Create a Microsoft Agent Framework tool backed by this connector.
+
+        Agent Framework is the successor to Semantic Kernel's agent APIs. The returned
+        ``FunctionTool`` goes straight into ``Agent(tools=[...])``, with no ``Kernel``,
+        plugin, or ``KernelParameterMetadata`` needed. The model can set ``query``,
+        ``count``, and ``freshness``; everything else is fixed here by the developer.
+
+        Results come back as a numbered list with the title, URL, and snippets of each
+        hit, so the model has the source links it needs to cite. Search failures
+        (including the keyless free-tier limit) are returned to the model as text
+        instead of raising, so one failed search does not end the agent run.
+
+        Args:
+            name: The tool name shown to the model.
+            description: The tool description shown to the model.
+            top: Default number of results when the model does not pass ``count`` (1 to 100).
+            freshness: Default freshness (``day``, ``week``, ``month``, ``year``, or
+                ``YYYY-MM-DDtoYYYY-MM-DD``) when the model does not pass one.
+            country: 2-letter country code applied to every search.
+            language: Result language (BCP 47) applied to every search.
+            safesearch: ``off``, ``moderate``, or ``strict``, applied to every search.
+            approval_mode: Agent Framework approval mode. Web search is read-only, so the
+                default is ``never_require``.
+            max_invocations: Optional cap on how many times the tool may be called over
+                its lifetime. Useful for staying inside the keyless free tier.
+
+        Returns:
+            An ``agent_framework.FunctionTool``.
+
+        Raises:
+            ServiceInitializationError: If Agent Framework is not installed, or ``top``
+                is out of range.
+        """
+        try:
+            from agent_framework import tool  # noqa: PLC0415 - optional dependency, imported on use
+        except ImportError as ex:
+            raise ServiceInitializationError(_AGENT_FRAMEWORK_HINT) from ex
+
+        if not 1 <= top <= MAX_TOP:
+            raise ServiceInitializationError(f"top must be between 1 and {MAX_TOP}.")
+
+        fixed: dict[str, str | int] = {
+            key: value
+            for key, value in (("country", country), ("language", language), ("safesearch", safesearch))
+            if value
+        }
+        default_freshness = freshness
+
+        async def you_search(
+            query: Annotated[str, "The search query."],
+            count: Annotated[
+                int | None, Field(description="Number of results to return. Omit for the default.", ge=1, le=MAX_TOP)
+            ] = None,
+            freshness: Annotated[
+                str | None,
+                "Only return results from this period: day, week, month, year, "
+                "or a date range written as YYYY-MM-DDtoYYYY-MM-DD. Omit for any time.",
+            ] = None,
+        ) -> str:
+            params: dict[str, str | int] = {"query": query, "count": count or top, **fixed}
+            period = freshness or default_freshness
+            if period:
+                params["freshness"] = period
+            try:
+                response = await self._send(params)
+            except ServiceInvalidRequestError as ex:
+                return f"You.com search failed: {ex}"
+            return self._format_for_agent(response)
+
+        return tool(
+            you_search,
+            name=name,
+            description=description,
+            approval_mode=approval_mode,
+            max_invocations=max_invocations,
+        )
+
+    def _format_for_agent(self, response: YouSearchResponse) -> str:
+        blocks: list[str] = []
+        for web_page in response.results.web:
+            blocks.append(self._format_hit(len(blocks) + 1, web_page, self._page_content(web_page)))
+        for news_result in response.results.news:
+            blocks.append(self._format_hit(len(blocks) + 1, news_result, news_result.description or ""))
+        return "\n\n".join(blocks) if blocks else "No results found."
+
+    @staticmethod
+    def _format_hit(index: int, hit: YouWebPage | YouNewsResult, content: str) -> str:
+        lines = [f"{index}. {hit.title or hit.url or 'Untitled'}"]
+        if hit.url:
+            lines.append(f"URL: {hit.url}")
+        if hit.page_age:
+            lines.append(f"Published: {hit.page_age}")
+        if content:
+            lines.append(content)
+        return "\n".join(lines)
+
     async def _get_result_strings(self, response: YouSearchResponse) -> AsyncIterable[str]:
         for web_page in response.results.web:
             yield self._page_content(web_page)
@@ -239,9 +361,10 @@ class YouSearch(KernelBaseModel, TextSearch):
 
     async def _inner_search(self, query: str, options: SearchOptions) -> YouSearchResponse:
         self._validate_options(options)
+        return await self._send(self._build_request_parameters(query, options))
 
+    async def _send(self, params: dict[str, str | int]) -> YouSearchResponse:
         url = KEYLESS_URL if self._keyless() else KEYED_URL
-        params = self._build_request_parameters(query, options)
 
         logger.info(f"Sending GET request to {url}")
 
