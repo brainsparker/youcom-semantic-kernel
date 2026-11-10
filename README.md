@@ -3,7 +3,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/youcom-semantic-kernel.svg)](https://pypi.org/project/youcom-semantic-kernel)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/youcom-semantic-kernel.svg)](https://pypi.org/project/youcom-semantic-kernel)
 
-[You.com](https://you.com) web search for [Semantic Kernel](https://github.com/microsoft/semantic-kernel) (Python), implementing SK's `TextSearch` abstraction.
+[You.com](https://you.com) web search for [Semantic Kernel](https://github.com/microsoft/semantic-kernel) (Python), implementing SK's `TextSearch` abstraction. Also works as a tool in [Microsoft Agent Framework](#in-a-microsoft-agent-framework-agent) agents.
 
 Works with **zero configuration**: without an API key, searches use You.com's keyless free tier (rate limited per IP), so you can evaluate the connector without provisioning keys. Set the `YDC_API_KEY` environment variable to use the keyed [You.com Search API](https://you.com/docs/api-reference/search/v1-search) with higher limits — get a free key at [you.com/platform](https://you.com/platform).
 
@@ -52,6 +52,44 @@ kernel.add_function(
     ),
 )
 ```
+
+### In a Microsoft Agent Framework agent
+
+[Microsoft Agent Framework](https://github.com/microsoft/agent-framework) is the successor to Semantic Kernel's agent APIs. If you are moving an agent over, the same connector comes with you. Install the extra (Python 3.11+):
+
+```bash
+pip install 'youcom-semantic-kernel[agent-framework]'
+```
+
+```python
+from agent_framework import Agent
+from agent_framework.openai import OpenAIChatClient
+from youcom_semantic_kernel import YouSearch
+
+agent = Agent(
+    client=OpenAIChatClient(),
+    instructions="Answer with real-time web results and cite your sources.",
+    tools=[YouSearch().as_agent_framework_tool()],  # no Kernel, no plugin, no API key
+)
+response = await agent.run("What changed in the latest Agent Framework release?")
+print(response.text)
+```
+
+`as_agent_framework_tool()` returns an Agent Framework `FunctionTool`. The model chooses `query`, `count`, and `freshness`; you fix the rest:
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `name` | `"you_search"` | Tool name shown to the model. |
+| `description` | built in | Tool description shown to the model. |
+| `top` | `5` | Results returned when the model does not pass `count` (1 to 100). |
+| `freshness` | `None` | Default freshness when the model does not pass one. |
+| `country`, `language`, `safesearch` | `None` | Applied to every search; not visible to the model. |
+| `approval_mode` | `"never_require"` | Set to `"always_require"` to gate each search behind human approval. |
+| `max_invocations` | `None` | Cap on total calls, for example to stay inside the keyless free tier. |
+
+Each result reaches the model as a title, a `URL:` line, the publish date when known, and the page snippets, so answers can cite sources. Search errors, including the keyless rate limit, are returned to the model as text so one failed search does not end the run.
+
+Why not `create_search_function(...).as_agent_framework_tool()`? Semantic Kernel's generic bridge works too, but it returns snippet text without URLs and does not expose `freshness` to the model.
 
 ### Filters
 

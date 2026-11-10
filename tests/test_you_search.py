@@ -2,13 +2,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import HTTPStatusError, Request, Response
 from semantic_kernel.data.text_search import TextSearchResult
-from semantic_kernel.exceptions import ServiceInvalidRequestError
+from semantic_kernel.exceptions import ServiceInitializationError, ServiceInvalidRequestError
 
 from youcom_semantic_kernel import YouSearch, YouSettings
 from youcom_semantic_kernel.you_search import KEYED_URL, KEYLESS_URL, USER_AGENT
@@ -230,3 +231,16 @@ class TestYouSearchIntegration:
         results = await search.search("What is Semantic Kernel?", top=2)
         strings = [r async for r in results.results]
         assert len(strings) > 0
+
+
+def test_agent_framework_tool_without_agent_framework_raises_install_hint(clean_env):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "agent_framework":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=fake_import):
+        with pytest.raises(ServiceInitializationError, match=r"youcom-semantic-kernel\[agent-framework\]"):
+            YouSearch().as_agent_framework_tool()

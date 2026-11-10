@@ -9,7 +9,7 @@ description = "You.com web search connector for Semantic Kernel — works with z
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-keywords = ["Semantic Kernel", "You.com", "Web Search", "AI Search", "TextSearch"]
+keywords = ["Semantic Kernel", "Microsoft Agent Framework", "You.com", "Web Search", "AI Search", "TextSearch"]
 authors = [{ name = "You.com", email = "developers@you.com" }]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
@@ -26,6 +26,9 @@ dependencies = [
   "pydantic>=2.0.0",
   "typing-extensions>=4.5.0; python_version < '3.12'",
 ]
+
+[project.optional-dependencies]
+agent-framework = ["agent-framework-core>=1.0.0; python_version >= '3.11'"]
 
 [project.urls]
 Documentation = "https://github.com/youdotcom-oss/youcom-semantic-kernel#readme"
@@ -50,6 +53,10 @@ ignore = ["B008", "C901", "EM101", "EM102", "PLR0911", "PLR0912", "PLR0913", "PL
 [tool.mypy]
 check_untyped_defs = true
 disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = "agent_framework.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
